@@ -261,6 +261,18 @@ public class ResponseSender {
     }
 
     /**
+     * Send a JSONObject directly over BLE without reliability wrapping or double-envelope.
+     * Use for high-frequency data (e.g. IMU stream) where the standard sendGenericResponse
+     * wrapper would exceed the BES2700 UART buffer limit (~200 bytes).
+     *
+     * @param data The JSON object to send
+     */
+    public void sendJsonDirect(JSONObject data) {
+        if (!isBluetoothConnected()) return;
+        sendDataOverBluetooth(data.toString().getBytes());
+    }
+
+    /**
      * Get the service manager instance.
      *
      * @return The service manager

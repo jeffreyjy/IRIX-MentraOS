@@ -23,6 +23,7 @@ import java.util.Set;
  */
 public class ImuCommandHandler implements ICommandHandler {
     private static final String TAG = "ImuCommandHandler";
+    private static final boolean VERBOSE_LOGGING = false;
     
     // Command types
     private static final String CMD_IMU_SINGLE = "imu_single";
@@ -34,6 +35,11 @@ public class ImuCommandHandler implements ICommandHandler {
     private final Context context;
     private final ResponseSender responseSender;
     private ImuManager imuManager;
+    private boolean firstStreamResponseLogged = false;
+
+    public ImuManager getImuManager() {
+        return imuManager;
+    }
     
     public ImuCommandHandler(Context context, ResponseSender responseSender) {
         this.context = context;
@@ -146,16 +152,18 @@ public class ImuCommandHandler implements ICommandHandler {
             // Parse streaming parameters with defaults
             int rateHz = data.optInt("rate_hz", 50);
             long batchMs = data.optLong("batch_ms", 0);
-            
+            boolean continuous = data.optBoolean("continuous", false);
+
             // Validate and clamp parameters
             rateHz = Math.min(100, Math.max(1, rateHz)); // 1-100 Hz
             batchMs = Math.min(1000, Math.max(0, batchMs)); // 0-1000ms
-            
-            Log.d(TAG, "Starting IMU stream: " + rateHz + "Hz, batch: " + batchMs + "ms");
-            
+
+            Log.d(TAG, "Starting IMU stream: " + rateHz + "Hz, batch: " + batchMs + "ms, continuous: " + continuous);
+
             // Start streaming with auto-timeout
-            imuManager.startStreaming(rateHz, batchMs);
-            
+            imuManager.startStreaming(rateHz, batchMs, continuous);
+            firstStreamResponseLogged = false;
+
             // Send acknowledgment
             sendAckResponse("IMU streaming started");
             
@@ -268,13 +276,27 @@ public class ImuCommandHandler implements ICommandHandler {
             if (!data.has("timestamp")) {
                 data.put("timestamp", System.currentTimeMillis());
             }
-            
-            // Get the type from the data to use as response type
+
             String responseType = data.optString("type", "imu_response");
-            
-            // Send via ResponseSender using the generic response method
-            responseSender.sendGenericResponse(responseType, data, System.currentTimeMillis());
-            
+            if ("imu_stream_response".equals(responseType) && !firstStreamResponseLogged) {
+                firstStreamResponseLogged = true;
+                Log.i(TAG, "First imu_stream_response sent to phone");
+            }
+            if (VERBOSE_LOGGING) {
+                Log.d(TAG, "sendResponse type=" + responseType);
+            }
+
+            // IMU stream data bypasses the standard double-envelope wrapper to stay within the
+            // ~200-byte BES2700 UART buffer limit. All other types use the standard wrapper.
+            if ("imu_stream_response".equals(responseType)) {
+                responseSender.sendJsonDirect(data);
+            } else {
+                responseSender.sendGenericResponse(responseType, data, System.currentTimeMillis());
+            }
+            if (VERBOSE_LOGGING) {
+                Log.d(TAG, "send returned (no exception)");
+            }
+
         } catch (JSONException e) {
             Log.e(TAG, "Error sending IMU response", e);
         }

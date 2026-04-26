@@ -16,6 +16,7 @@ import java.io.OutputStream;
  */
 public class ComManager {
     private static final String TAG = "ComManager";
+    private static final boolean VERBOSE_LOGGING = false;
 
     // Serial port configuration - matches the K900 SDK
     private static final String COM_PATH = "/dev/ttyS1";
@@ -124,7 +125,9 @@ public class ComManager {
     public boolean send(byte[] data) {
         if (mbStart && mOS != null && !mbOtaUpdating) {
             try {
-                Log.d(TAG, ">>> sending " + data.length + " bytes");
+                if (VERBOSE_LOGGING) {
+                    Log.d(TAG, ">>> sending " + data.length + " bytes");
+                }
                 mOS.write(data);
                 mOS.flush();
 
@@ -134,9 +137,9 @@ public class ComManager {
             }
         } else {
             if (mbOtaUpdating) {
-                Log.d(TAG, "Cannot send data - BES OTA in progress");
+                Log.w(TAG, "Send blocked — BES OTA in progress");
             } else {
-                Log.d(TAG, "Cannot send data - not started or output stream is null. mbStart=" + mbStart + ", mOS=" + mOS);
+                Log.w(TAG, "Send failed — mbStart=" + mbStart + " mOS=" + (mOS != null));
             }
         }
 

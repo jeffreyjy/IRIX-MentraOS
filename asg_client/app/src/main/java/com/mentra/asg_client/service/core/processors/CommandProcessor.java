@@ -69,6 +69,7 @@ public class CommandProcessor {
     private final ResponseSender responseSender;
     private final ChunkReassembler chunkReassembler;
     private final RgbLedCommandHandler rgbLedCommandHandler;
+    private ImuCommandHandler imuCommandHandler;
 
     public CommandProcessor(Context context, ICommunicationManager communicationManager, IStateManager stateManager, IMediaManager streamingManager, IResponseBuilder responseBuilder, IConfigurationManager configurationManager, AsgClientServiceManager serviceManager, FileManager fileManager, RgbLedCommandHandler rgbLedCommandHandler) {
         Log.d(TAG, "🔧 Initializing CommandProcessor with dependencies");
@@ -327,7 +328,8 @@ public class CommandProcessor {
             commandHandlerRegistry.registerHandler(new OtaCommandHandler());
             Log.d(TAG, "✅ Registered OtaCommandHandler");
 
-            commandHandlerRegistry.registerHandler(new ImuCommandHandler(context, responseSender));
+            imuCommandHandler = new ImuCommandHandler(context, responseSender);
+            commandHandlerRegistry.registerHandler(imuCommandHandler);
             Log.d(TAG, "✅ Registered ImuCommandHandler");
             
             commandHandlerRegistry.registerHandler(new GalleryCommandHandler(serviceManager, communicationManager));
@@ -362,6 +364,15 @@ public class CommandProcessor {
     // ========================================
     // Public API Methods (Interface Segregation)
     // ========================================
+
+    /**
+     * Directly stop any active IMU stream. Called on BLE disconnect.
+     */
+    public void stopImuStreaming() {
+        if (imuCommandHandler != null && imuCommandHandler.getImuManager() != null) {
+            imuCommandHandler.getImuManager().stopStreaming();
+        }
+    }
 
     /**
      * Send download progress notification.

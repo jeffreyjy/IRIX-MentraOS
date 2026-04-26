@@ -7,6 +7,7 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -35,6 +36,7 @@ public class ImuManager implements SensorEventListener {
     private static final int SINGLE_READING_TIMEOUT_MS = 100;
     private static final int GESTURE_SAMPLING_DELAY_US = 60000; // 16Hz for gestures
     private static final int STREAM_TIMEOUT_MS = 60000; // 60 second auto-timeout
+    private static final int CONTINUOUS_CEILING_MS = 600000; // 10 minute safety ceiling
     private static final int GESTURE_TIMEOUT_MS = 30000; // 30 second auto-timeout
     
     // Gesture detection thresholds (using accelerometer only)
@@ -56,8 +58,12 @@ public class ImuManager implements SensorEventListener {
     
     // Sensor state
     private boolean sensorsActive = false;
-    private boolean isStreaming = false;
+    private volatile boolean isStreaming = false;
     private boolean gestureDetectionActive = false;
+    private boolean firstEventLogged = false;
+    private int accelEventCount = 0;
+    private int streamDataCount = 0;
+    private int batchSendCount = 0;
     
     // Latest sensor values
     private final float[] accelValues = new float[3];
@@ -69,9 +75,11 @@ public class ImuManager implements SensorEventListener {
     
     // Streaming configuration
     private int streamRateHz = 50;
-    private long streamBatchMs = 0;
+    private volatile long streamBatchMs = 0;
     private final List<JSONObject> streamBuffer = new ArrayList<>();
+    private boolean continuousMode = false;
     private Runnable streamTimeoutRunnable;
+    private Runnable batchSendRunnable;
     
     // Gesture detection
     private final Set<String> subscribedGestures = new HashSet<>();
@@ -80,6 +88,11 @@ public class ImuManager implements SensorEventListener {
     
     // Callbacks
     private ImuDataCallback dataCallback;
+
+    // Wake lock — prevents CPU sleep during IMU streaming
+    private static final long WAKELOCK_GRACE_PERIOD_MS = 30000;
+    private PowerManager.WakeLock imuWakeLock;
+    private Runnable wakeLockReleaseRunnable;
     
     public interface ImuDataCallback {
         void onSingleReading(JSONObject data);
@@ -136,45 +149,102 @@ public class ImuManager implements SensorEventListener {
     }
     
     /**
-     * Start IMU streaming with auto-timeout
+     * Start IMU streaming with auto-timeout (backward-compatible overload)
      */
     public void startStreaming(int rateHz, long batchMs) {
-        Log.d(TAG, "Starting IMU stream at " + rateHz + "Hz, batch: " + batchMs + "ms");
-        
-        stopStreaming(); // Stop any existing stream
-        
-        this.streamRateHz = Math.min(100, Math.max(1, rateHz)); // Clamp 1-100Hz
-        this.streamBatchMs = Math.min(1000, Math.max(0, batchMs)); // Max 1 second batching
+        startStreaming(rateHz, batchMs, false);
+    }
+
+    /**
+     * Start IMU streaming with optional continuous mode.
+     * Posts onto main looper for thread safety.
+     */
+    public void startStreaming(int rateHz, long batchMs, boolean continuous) {
+        handler.post(() -> startStreamingInternal(rateHz, batchMs, continuous));
+    }
+
+    /**
+     * Stop IMU streaming. Posts onto main looper for thread safety.
+     */
+    public void stopStreaming() {
+        handler.post(this::stopStreamingInternal);
+    }
+
+    private void startStreamingInternal(int rateHz, long batchMs, boolean continuous) {
+        int clampedRate = Math.min(100, Math.max(1, rateHz));
+        long clampedBatch = Math.min(1000, Math.max(0, batchMs));
+
+        if (isStreaming && streamRateHz == clampedRate
+                && streamBatchMs == clampedBatch && continuousMode == continuous) {
+            Log.d(TAG, "IMU stream active with same config — refreshing sensors + resetting timeout");
+            activateSensorsForStreaming();
+            if (streamTimeoutRunnable != null) {
+                handler.removeCallbacks(streamTimeoutRunnable);
+            }
+            int timeoutMs = continuous ? CONTINUOUS_CEILING_MS : STREAM_TIMEOUT_MS;
+            streamTimeoutRunnable = () -> {
+                Log.w(TAG, "Stream auto-timeout after " + timeoutMs + "ms");
+                stopStreamingInternal();
+            };
+            handler.postDelayed(streamTimeoutRunnable, timeoutMs);
+            return;
+        }
+
+        // Stop any existing stream first
+        stopStreamingInternal();
+
+        Log.d(TAG, "Starting IMU stream at " + clampedRate + "Hz, batch: " + clampedBatch
+                + "ms, continuous: " + continuous);
+
+        this.streamRateHz = clampedRate;
+        this.streamBatchMs = clampedBatch;
+        this.continuousMode = continuous;
         this.isStreaming = true;
-        
+
+        acquireImuWakeLock();
         activateSensorsForStreaming();
-        
+        Log.i(TAG, "IMU_STREAM_STARTED rateHz=" + clampedRate + " batchMs=" + clampedBatch);
+
         // Setup auto-timeout
+        int timeoutMs = continuous ? CONTINUOUS_CEILING_MS : STREAM_TIMEOUT_MS;
         streamTimeoutRunnable = () -> {
-            Log.w(TAG, "Stream auto-timeout after " + STREAM_TIMEOUT_MS + "ms");
-            stopStreaming();
+            Log.w(TAG, "Stream auto-timeout after " + timeoutMs + "ms");
+            stopStreamingInternal();
         };
-        handler.postDelayed(streamTimeoutRunnable, STREAM_TIMEOUT_MS);
-        
+        handler.postDelayed(streamTimeoutRunnable, timeoutMs);
+
         // Start batch sending if configured
         if (streamBatchMs > 0) {
             startBatchSending();
         }
     }
-    
-    /**
-     * Stop IMU streaming
-     */
-    public void stopStreaming() {
+
+    private void stopStreamingInternal() {
+        if (!isStreaming) {
+            return;
+        }
+
         Log.d(TAG, "Stopping IMU stream");
-        
+
         isStreaming = false;
-        
+        releaseImuWakeLock();
+        Log.i(TAG, "IMU_STREAM_STOPPED");
+        continuousMode = false;
+
+        synchronized (streamBuffer) {
+            streamBuffer.clear();
+        }
+
+        if (batchSendRunnable != null) {
+            handler.removeCallbacks(batchSendRunnable);
+            batchSendRunnable = null;
+        }
+
         if (streamTimeoutRunnable != null) {
             handler.removeCallbacks(streamTimeoutRunnable);
             streamTimeoutRunnable = null;
         }
-        
+
         if (!gestureDetectionActive) {
             deactivateSensors();
         }
@@ -255,23 +325,86 @@ public class ImuManager implements SensorEventListener {
     private void activateSensorsForStreaming() {
         sensorsActive = true;
         sensorManager.unregisterListener(this);
-        
+
         // Calculate sampling period in microseconds
         int samplingPeriodUs = 1000000 / streamRateHz;
-        
+
+        Log.d(TAG, "Sensor availability — accel: " + accelerometer
+                + ", gyro: " + gyroscope + ", mag: " + magnetometer
+                + ", rot: " + rotationVector);
+
         // Register all sensors for streaming
-        sensorManager.registerListener(this, accelerometer, samplingPeriodUs);
+        boolean accelOk = sensorManager.registerListener(this, accelerometer, samplingPeriodUs);
+        Log.d(TAG, "registerListener accel=" + accelOk + " periodUs=" + samplingPeriodUs);
+        if (!accelOk) {
+            Log.e(TAG, "CRITICAL: accelerometer registerListener failed — IMU stream will produce no data");
+        }
         if (gyroscope != null) {
-            sensorManager.registerListener(this, gyroscope, samplingPeriodUs);
+            boolean gyroOk = sensorManager.registerListener(this, gyroscope, samplingPeriodUs);
+            Log.d(TAG, "registerListener gyro=" + gyroOk);
         }
         if (magnetometer != null) {
-            sensorManager.registerListener(this, magnetometer, samplingPeriodUs);
+            boolean magOk = sensorManager.registerListener(this, magnetometer, samplingPeriodUs);
+            Log.d(TAG, "registerListener mag=" + magOk);
         }
         if (rotationVector != null) {
-            sensorManager.registerListener(this, rotationVector, samplingPeriodUs);
+            boolean rotOk = sensorManager.registerListener(this, rotationVector, samplingPeriodUs);
+            Log.d(TAG, "registerListener rot=" + rotOk);
         }
     }
     
+    private void acquireImuWakeLock() {
+        try {
+            if (wakeLockReleaseRunnable != null) {
+                handler.removeCallbacks(wakeLockReleaseRunnable);
+                wakeLockReleaseRunnable = null;
+            }
+            if (imuWakeLock == null) {
+                PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+                imuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "IRIX:ImuStream");
+            }
+            if (!imuWakeLock.isHeld()) {
+                imuWakeLock.acquire(CONTINUOUS_CEILING_MS + 60000);
+                Log.i(TAG, "IMU wake lock acquired");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to acquire IMU wake lock", e);
+        }
+    }
+
+    private void releaseImuWakeLock() {
+        if (wakeLockReleaseRunnable != null) {
+            handler.removeCallbacks(wakeLockReleaseRunnable);
+        }
+        wakeLockReleaseRunnable = () -> {
+            try {
+                if (imuWakeLock != null && imuWakeLock.isHeld()) {
+                    imuWakeLock.release();
+                    Log.i(TAG, "IMU wake lock released (after grace period)");
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to release IMU wake lock", e);
+            }
+            wakeLockReleaseRunnable = null;
+        };
+        handler.postDelayed(wakeLockReleaseRunnable, WAKELOCK_GRACE_PERIOD_MS);
+    }
+
+    private void releaseImuWakeLockNow() {
+        if (wakeLockReleaseRunnable != null) {
+            handler.removeCallbacks(wakeLockReleaseRunnable);
+            wakeLockReleaseRunnable = null;
+        }
+        try {
+            if (imuWakeLock != null && imuWakeLock.isHeld()) {
+                imuWakeLock.release();
+                Log.i(TAG, "IMU wake lock released");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to release IMU wake lock", e);
+        }
+    }
+
     private void deactivateSensors() {
         if (sensorsActive) {
             Log.d(TAG, "Deactivating sensors to save power");
@@ -282,6 +415,11 @@ public class ImuManager implements SensorEventListener {
     
     @Override
     public void onSensorChanged(SensorEvent event) {
+        if (!firstEventLogged) {
+            firstEventLogged = true;
+            Log.i(TAG, "First sensor event: type=" + event.sensor.getType()
+                    + " name=" + event.sensor.getName());
+        }
         switch (event.sensor.getType()) {
             case Sensor.TYPE_ACCELEROMETER:
                 System.arraycopy(event.values, 0, accelValues, 0, 3);
@@ -310,9 +448,13 @@ public class ImuManager implements SensorEventListener {
                 break;
         }
         
-        // Handle streaming if active
-        if (isStreaming && streamBatchMs == 0) {
-            // Send immediately if no batching
+        // Handle streaming if active — gate on accelerometer so we send once per
+        // cycle instead of once per sensor (4 sensors = 4x unintended rate)
+        if (isStreaming && event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
+            accelEventCount++;
+            if (accelEventCount <= 3 || accelEventCount % 25 == 0) {
+                Log.d(TAG, "accel event #" + accelEventCount + " values=" + event.values[0] + "," + event.values[1] + "," + event.values[2]);
+            }
             sendStreamData();
         }
     }
@@ -349,18 +491,20 @@ public class ImuManager implements SensorEventListener {
     private void sendStreamData() {
         try {
             JSONObject reading = createImuReading();
-            
+            streamDataCount++;
+            if (streamDataCount == 1) Log.i(TAG, "sendStreamData first call, batchMs=" + streamBatchMs);
+
             if (streamBatchMs > 0) {
-                // Add to buffer for batching
-                streamBuffer.add(reading);
+                synchronized (streamBuffer) {
+                    streamBuffer.add(reading);
+                }
             } else {
-                // Send immediately
                 JSONObject data = new JSONObject();
                 data.put("type", "imu_stream_response");
                 JSONArray readings = new JSONArray();
                 readings.put(reading);
                 data.put("readings", readings);
-                
+
                 if (dataCallback != null) {
                     dataCallback.onStreamData(data);
                 }
@@ -369,9 +513,9 @@ public class ImuManager implements SensorEventListener {
             Log.e(TAG, "Error creating stream data JSON", e);
         }
     }
-    
+
     private void startBatchSending() {
-        handler.postDelayed(new Runnable() {
+        batchSendRunnable = new Runnable() {
             @Override
             public void run() {
                 if (isStreaming) {
@@ -379,24 +523,34 @@ public class ImuManager implements SensorEventListener {
                     handler.postDelayed(this, streamBatchMs);
                 }
             }
-        }, streamBatchMs);
+        };
+        handler.postDelayed(batchSendRunnable, streamBatchMs);
     }
-    
+
     private void sendBatchedData() {
-        if (streamBuffer.isEmpty()) {
-            return;
+        List<JSONObject> snapshot;
+        synchronized (streamBuffer) {
+            batchSendCount++;
+            Log.d(TAG, "sendBatchedData #" + batchSendCount + " bufferSize=" + streamBuffer.size());
+            if (streamBuffer.isEmpty()) {
+                return;
+            }
+            snapshot = new ArrayList<>(streamBuffer);
+            streamBuffer.clear();
         }
-        
+
         try {
             JSONObject data = new JSONObject();
             data.put("type", "imu_stream_response");
-            data.put("readings", new JSONArray(streamBuffer));
-            
+            JSONArray readings = new JSONArray();
+            for (JSONObject reading : snapshot) {
+                readings.put(reading);
+            }
+            data.put("readings", readings);
+
             if (dataCallback != null) {
                 dataCallback.onStreamData(data);
             }
-            
-            streamBuffer.clear();
         } catch (JSONException e) {
             Log.e(TAG, "Error sending batched data", e);
         }
@@ -406,15 +560,7 @@ public class ImuManager implements SensorEventListener {
         JSONObject reading = new JSONObject();
         reading.put("accel", new JSONArray(accelValues));
         reading.put("gyro", new JSONArray(gyroValues));
-        reading.put("mag", new JSONArray(magValues));
-        reading.put("quat", new JSONArray(quaternion));
-        
-        JSONArray euler = new JSONArray();
-        euler.put(Math.toDegrees(orientationAngles[0]));
-        euler.put(Math.toDegrees(orientationAngles[1]));
-        euler.put(Math.toDegrees(orientationAngles[2]));
-        reading.put("euler", euler);
-        
+        // mag and rotationVector sensors are null on Mentra Live hardware — omit to save bytes
         return reading;
     }
     
@@ -530,5 +676,6 @@ public class ImuManager implements SensorEventListener {
         stopStreaming();
         unsubscribeFromGestures();
         deactivateSensors();
+        releaseImuWakeLockNow();
     }
 }

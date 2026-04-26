@@ -30,7 +30,8 @@ public class MessageReliability {
     // Messages that NEVER get retry (prevent loops)
     private static final Set<String> NEVER_RETRY = Set.of(
         "msg_ack",
-        "keep_alive_ack"
+        "keep_alive_ack",
+        "imu_stream_response"
     );
 
     /**

@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class K900BluetoothManager extends BaseBluetoothManager implements SerialListener {
     private static final String TAG = "K900BluetoothManager";
+    private static final boolean VERBOSE_LOGGING = false;
 
     private final ComManager comManager;
     private boolean isSerialOpen = false;
@@ -130,10 +131,12 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
 
     @Override
     public boolean sendData(byte[] data) {
-        Log.d(TAG, "📡 =========================================");
-        Log.d(TAG, "📡 K900 BLUETOOTH SEND DATA");
-        Log.d(TAG, "📡 =========================================");
-        Log.d(TAG, "📡 Data length: " + (data != null ? data.length : 0) + " bytes");
+        if (VERBOSE_LOGGING) {
+            Log.d(TAG, "📡 =========================================");
+            Log.d(TAG, "📡 K900 BLUETOOTH SEND DATA");
+            Log.d(TAG, "📡 =========================================");
+            Log.d(TAG, "📡 Data length: " + (data != null ? data.length : 0) + " bytes");
+        }
 
         if (data == null || data.length == 0) {
             Log.w(TAG, "📡 ❌ Attempted to send null or empty data");
@@ -142,59 +145,56 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
 
         if (!isSerialOpen) {
             Log.w(TAG, "📡 ❌ Cannot send data - serial port not open");
-            notificationManager.showDebugNotification("Bluetooth Error", "Cannot send data - serial port not open");
             return false;
         }
 
-
-        Log.d(TAG, "📡 🔍 Checking if data is already in K900 protocol format...");
-        //First check if it 's already in protocol format
         if (!K900ProtocolUtils.isK900ProtocolFormat(data)) {
-            Log.d(TAG, "📡 📝 Data not in protocol format, processing...");
-            // Try to interpret as a JSON string that needs C-wrapping and protocol formatting
+            if (VERBOSE_LOGGING) {
+                Log.d(TAG, "📡 📝 Data not in protocol format, processing...");
+            }
             try {
-                // Convert to string for processing
                 String originalData = new String(data, "UTF-8");
-                Log.d(TAG, "📡 📄 Original data as string: " + originalData.substring(0, Math.min(originalData.length(), 100)) + "...");
+                if (VERBOSE_LOGGING) {
+                    Log.d(TAG, "📡 📄 Original data as string: " + originalData.substring(0, Math.min(originalData.length(), 100)) + "...");
+                }
 
-                // If looks like JSON but not C-wrapped, use the full formatting function
                 if (originalData.startsWith("{") && !K900ProtocolUtils.isCWrappedJson(originalData)) {
-                    Log.d(TAG, "📡 🔧 JSON data detected, applying C-wrapping and protocol formatting...");
-                    Log.d(TAG, "📡 📦 JSON DATA BEFORE C-WRAPPING: " + originalData);
+                    if (VERBOSE_LOGGING) {
+                        Log.d(TAG, "📡 🔧 JSON data detected, applying C-wrapping and protocol formatting...");
+                        Log.d(TAG, "📡 📦 JSON DATA BEFORE C-WRAPPING: " + originalData);
+                    }
                     data = K900ProtocolUtils.formatMessageForTransmission(originalData);
 
-                    // Log the first 50 bytes of the hex representation
-                    StringBuilder hexDump = new StringBuilder();
-                    for (int i = 0; i < Math.min(data.length, 50); i++) {
-                        hexDump.append(String.format("%02X ", data[i]));
+                    if (VERBOSE_LOGGING) {
+                        StringBuilder hexDump = new StringBuilder();
+                        for (int i = 0; i < Math.min(data.length, 50); i++) {
+                            hexDump.append(String.format("%02X ", data[i]));
+                        }
+                        Log.d(TAG, "📡 📦 AFTER C-WRAPPING & PROTOCOL FORMATTING (first 50 bytes): " + hexDump.toString());
+                        Log.d(TAG, "📡 📦 Total formatted length: " + data.length + " bytes");
                     }
-                    Log.d(TAG, "📡 📦 AFTER C-WRAPPING & PROTOCOL FORMATTING (first 50 bytes): " + hexDump.toString());
-                    Log.d(TAG, "📡 📦 Total formatted length: " + data.length + " bytes");
                 } else {
-                    // Otherwise just apply protocol formatting
-                    Log.d(TAG, "📡 📝 Data already C-wrapped or not JSON: " + originalData);
-                    Log.d(TAG, "📡 🔧 Formatting data with K900 protocol (adding ##...)");
+                    if (VERBOSE_LOGGING) {
+                        Log.d(TAG, "📡 📝 Data already C-wrapped or not JSON: " + originalData);
+                        Log.d(TAG, "📡 🔧 Formatting data with K900 protocol (adding ##...)");
+                    }
                     data = K900ProtocolUtils.packDataCommand(data, K900ProtocolUtils.CMD_TYPE_STRING);
                 }
             } catch (Exception e) {
-                // If we can't interpret as string, just apply protocol formatting to raw bytes
-                Log.d(TAG, "📡 🔧 Applying protocol format to raw bytes");
+                if (VERBOSE_LOGGING) {
+                    Log.d(TAG, "📡 🔧 Applying protocol format to raw bytes");
+                }
                 data = K900ProtocolUtils.packDataCommand(data, K900ProtocolUtils.CMD_TYPE_STRING);
             }
         } else {
-            Log.d(TAG, "📡 ✅ Data already in K900 protocol format");
+            if (VERBOSE_LOGGING) {
+                Log.d(TAG, "📡 ✅ Data already in K900 protocol format");
+            }
         }
 
-
-        Log.d(TAG, "📡 📤 Sending " + data.length + " bytes via K900 serial");
-
-        // Send the data via the serial port
         boolean sent = comManager.send(data);
-        Log.d(TAG, "📡 " + (sent ? "✅ Data sent successfully via serial port" : "❌ Failed to send data via serial port"));
-
-        // Only show notification for larger data packets to avoid spam
-        if (data.length > 10) {
-            notificationManager.showDebugNotification("Bluetooth Data", "Sent " + data.length + " bytes via serial port");
+        if (!sent) {
+            Log.d(TAG, "📡 ❌ Failed to send data via serial port");
         }
 
         return sent;

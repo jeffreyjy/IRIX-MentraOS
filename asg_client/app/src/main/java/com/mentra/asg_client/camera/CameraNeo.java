@@ -1520,7 +1520,7 @@ public class CameraNeo extends LifecycleService {
 
             // Set video encoding parameters
             // Use higher bitrate for better reliability and to prevent encoder issues
-            int bitRate = (videoSize.getWidth() >= 1920) ? 16000000 : 8000000; // 8Mbps for 1080p, 5Mbps for 720p
+            int bitRate = (videoSize.getWidth() >= 1920) ? 6000000 : 3000000;
             mediaRecorder.setVideoEncodingBitRate(bitRate);
             
             // Use fps from settings if available
@@ -1534,8 +1534,9 @@ public class CameraNeo extends LifecycleService {
                       "@" + frameRate + "fps, bitrate: " + bitRate);
 
             // Set audio encoding parameters
-            mediaRecorder.setAudioEncodingBitRate(128000);
-            mediaRecorder.setAudioSamplingRate(44100);
+            mediaRecorder.setAudioEncodingBitRate(48000);
+            mediaRecorder.setAudioSamplingRate(16000);
+            mediaRecorder.setAudioChannels(1);
             mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
 
             // Set dynamic orientation based on device rotation

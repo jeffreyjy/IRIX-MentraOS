@@ -339,19 +339,11 @@ public class RtmpStreamingService extends Service {
         }
 
         try {
-            int surfaceWidth = mStreamConfig.getVideoWidth();
-            int surfaceHeight = mStreamConfig.getVideoHeight();
-            Log.d(TAG, "Creating surface texture with size: " + surfaceWidth + "x" + surfaceHeight);
             mSurfaceTexture = new SurfaceTexture(0);
-            mSurfaceTexture.setDefaultBufferSize(surfaceWidth, surfaceHeight);
+            mSurfaceTexture.setDefaultBufferSize(1, 1);
             mSurface = new Surface(mSurfaceTexture);
-            Log.d(TAG, "Surface created successfully");
         } catch (Exception e) {
             Log.e(TAG, "Error creating surface", e);
-            EventBus.getDefault().post(new StreamingEvent.Error("Failed to create surface: " + e.getMessage()));
-            if (sStatusCallback != null) {
-                sStatusCallback.onStreamError("Failed to create surface: " + e.getMessage());
-            }
         }
     }
 
@@ -645,13 +637,9 @@ public class RtmpStreamingService extends Service {
             // Remember this streamer so stop flows can clean up even if mStreamer gets swapped/null
             mLastStreamerForCleanup = mStreamer;
 
-            // Start the preview with our surface
-            if (mSurface != null && mSurface.isValid()) {
-                mStreamer.startPreview(mSurface, "0"); // Using "0" for back camera
-                Log.d(TAG, "Started camera preview on surface");
-            } else {
-                Log.e(TAG, "Cannot start preview, surface is invalid");
-            }
+            // Start camera — null preview surface is fine (encoder-only session)
+            mStreamer.startPreview(mSurface, "0");
+            Log.d(TAG, "Started camera with preview surface: " + (mSurface != null ? "present" : "null (encoder-only)"));
 
             // Notify that we're ready to connect a preview
             EventBus.getDefault().post(new StreamingEvent.Ready());
@@ -817,28 +805,20 @@ public class RtmpStreamingService extends Service {
             releaseSurface();
             createSurface();
 
-            if (mSurface != null && mSurface.isValid()) {
-                try {
-                    mStreamer.stopPreview(); // Stop any existing preview first
-                } catch (Exception e) {
-                    Log.d(TAG, "No preview to stop: " + e.getMessage());
-                }
+            try {
+                mStreamer.stopPreview(); // Stop any existing preview first
+            } catch (Exception e) {
+                Log.d(TAG, "No preview to stop: " + e.getMessage());
+            }
 
-                // Start fresh preview
-                mStreamer.startPreview(mSurface, "0");
-                Log.d(TAG, "Started camera preview for streaming");
+            // Start camera — null preview surface is fine (encoder-only session)
+            mStreamer.startPreview(mSurface, "0");
+            Log.d(TAG, "Started camera with preview surface: " + (mSurface != null ? "present" : "null (encoder-only)"));
 
-                // ADD THIS DELAY:
-                try {
-                    Thread.sleep(200); // Give encoder time to stabilize
-                } catch (InterruptedException e) {
-                    Log.w(TAG, "Interrupted during encoder stabilization");
-                }
-            } else {
-                String error = "Failed to create valid surface for streaming";
-                StreamingReporting.reportSurfaceCreationFailure(RtmpStreamingService.this,
-                    "create_surface", error, null);
-                throw new Exception(error);
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Log.w(TAG, "Interrupted during encoder stabilization");
             }
 
             // For Kotlin's suspend functions, we need to provide a Continuation

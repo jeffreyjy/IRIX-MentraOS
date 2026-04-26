@@ -791,7 +791,10 @@ public class AsgClientService extends Service implements NetworkStateListener, B
             Log.d(TAG, "🎯 Enabling swipe volume control on Bluetooth connection");
             handleSwipeVolumeControl(false);
         } else {
-            Log.d(TAG, "📶 Bluetooth disconnected - no additional actions needed");
+            Log.d(TAG, "📶 Bluetooth disconnected - stopping active IMU streams");
+            if (commandProcessor != null) {
+                commandProcessor.stopImuStreaming();
+            }
         }
     }
 
